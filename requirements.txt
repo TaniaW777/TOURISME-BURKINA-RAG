@@ -1,0 +1,47 @@
+# ============================================================
+# TOURISME BURKINA RAG — requirements.txt
+# 100% open source - Testé Windows CPU 2026
+# Torch installé manuellement via CPU index
+# ============================================================
+
+# Core RAG
+sentence-transformers
+chromadb
+transformers
+
+# LLM local
+ollama
+
+# Backend
+fastapi
+uvicorn[standard]
+pydantic
+
+# Frontend
+gradio
+
+# Scraping & data
+requests
+beautifulsoup4
+trafilatura
+pdfplumber
+
+# Security & utils
+bleach
+loguru
+slowapi
+python-dotenv
+cryptography
+
+# Agent & orchestration
+langgraph
+langchain-core
+
+# Evaluation
+scikit-learn
+pandas
+rouge-score
+langdetect
+
+# Optional (si tu utilises)
+numpy
