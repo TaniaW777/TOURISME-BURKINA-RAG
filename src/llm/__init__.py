@@ -15,4 +15,5 @@ from src.llm.base import (  # noqa: F401
     LLMService,
     LLMTimeoutError,
 )
+from src.llm.groq_service import GroqService  # noqa: F401 (SDK importé paresseusement)
 from src.llm.mock import MockLLMService  # noqa: F401
