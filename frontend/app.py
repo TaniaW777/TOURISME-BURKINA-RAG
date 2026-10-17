@@ -64,13 +64,23 @@ EXAMPLE_QUESTIONS = [
 def answer_question(question: str, top_k: int = 5):
     """
     Traite une question et retourne la réponse RAG.
-    Appelée par Gradio à chaque soumission.
+    Appelée par Gradio à chaque soumission (4 sorties câblées : réponse,
+    sources, documents, métriques — toutes les branches retournent 4 valeurs).
     """
     if not question.strip():
-        return "⚠️ Veuillez poser une question.", "", ""
+        return "⚠️ Veuillez poser une question.", "", "", ""
+
+    # Pipeline obtenu via l'initialisation paresseuse (jamais le global nu :
+    # à la première question il vaut None → AttributeError sinon).
+    active = _get_pipeline()
+    if active is None:
+        return (
+            f"⚙️ Assistant non configuré : {_pipeline_error}",
+            "", "", "",
+        )
 
     try:
-        result = pipeline.query(question)
+        result = active.query(question, top_k=top_k)
 
         # Réponse principale
         response = result["response"]
@@ -79,6 +89,7 @@ def answer_question(question: str, top_k: int = 5):
         if not result["safe"]:
             return (
                 "🚫 Question non autorisée. Posez une question sur le tourisme burkinabè.",
+                "",
                 "",
                 ""
             )
