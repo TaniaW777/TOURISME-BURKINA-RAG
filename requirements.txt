@@ -9,8 +9,9 @@ sentence-transformers
 chromadb
 transformers
 
-# LLM local
-ollama
+# LLM — génération
+ollama          # pipeline legacy (Ollama local)
+groq            # génération v2 via l'API Groq (Phase 4)
 
 # Backend
 fastapi
