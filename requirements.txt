@@ -32,17 +32,7 @@ bleach
 loguru
 slowapi
 python-dotenv
-cryptography
 
 # Agent & orchestration
 langgraph
 langchain-core
-
-# Evaluation
-scikit-learn
-pandas
-rouge-score
-langdetect
-
-# Optional (si tu utilises)
-numpy
