@@ -162,11 +162,15 @@ class TestLegacyProtection:
 
     def test_legacy_index_untouched_by_guard(self):
         # le simple fait que les tests ci-dessus lèvent SafetyError AVANT
-        # toute écriture protège le legacy ; on le vérifie factuellement :
+        # toute écriture protège le legacy ; on le vérifie factuellement —
+        # mais seulement là où l'index legacy local existe (gitignoré :
+        # absent d'un clone propre / CI).
         import chromadb
 
-        count = chromadb.PersistentClient(path=str(LEGACY)) \
-            .get_or_create_collection("tourisme_burkina").count()
+        if not LEGACY.is_dir():
+            pytest.skip("index legacy local absent (clone propre/CI - "
+                        "chroma_db n'est volontairement pas versionne)")
+        count = chromadb.PersistentClient(path=str(LEGACY))             .get_or_create_collection("tourisme_burkina").count()
         assert count == 785
 
 

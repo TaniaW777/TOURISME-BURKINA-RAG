@@ -1,0 +1,53 @@
+# CI — Tourisme Burkina RAG
+# Suite de tests pytest sur chaque PR vers main et chaque push sur main.
+# Volontairement minimal : pas de déploiement, pas de secrets, pas d'accès
+# aux services externes (Groq/Ollama), pas de téléchargement de poids de
+# modèles d'embeddings, pas de construction du véritable index ChromaDB.
+name: tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # 3.13 : version sur laquelle la suite est vérifiée localement
+          # (venv de développement en 3.13.3) ; le README exige 3.10+.
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install CPU-only PyTorch first
+        # requirements.txt tire sentence-transformers → torch. Sur les runners
+        # Ubuntu, la roue par défaut de torch embarque CUDA (~2 Go) inutile en
+        # CPU : on pré-installe la roue CPU, pip réutilisera cette version.
+        run: pip install --extra-index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Install project dependencies
+        # pytest / reportlab / pyyaml : dépendances de test non listées dans
+        # requirements.txt (production) — voir la description de la PR CI.
+        run: pip install -r requirements.txt pytest reportlab pyyaml
+
+      - name: Run test suite
+        env:
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          # Les tests n'appellent jamais Groq/Ollama ; sans clé, le code est
+          # conçu pour le mode dégradé — aucun secret requis.
+        run: pytest tests/ -q
