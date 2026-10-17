@@ -25,6 +25,7 @@ from __future__ import annotations
 import io
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 from urllib import robotparser
 from urllib.parse import urlparse
@@ -222,3 +223,64 @@ def resp_encoding_fallback(body: bytes, content_type: str) -> str:
         return "utf-8"
     except UnicodeDecodeError:
         return "latin-1"
+
+
+# ──────────────────────────────────────────────
+# EXTRACTION PDF (distant ou local)
+# ──────────────────────────────────────────────
+def extract_pdf_bytes(data: bytes, url: str, title_hint: str = "") -> FetchResult:
+    """Extrait le texte d'octets PDF via pdfplumber, borné en pages."""
+    import pdfplumber
+
+    try:
+        texts: list[str] = []
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            if len(pdf.pages) > MAX_PDF_PAGES:
+                # on extrait les premières pages et on le signale dans le titre
+                pages = pdf.pages[:MAX_PDF_PAGES]
+            else:
+                pages = pdf.pages
+            for page in pages:
+                page_text = page.extract_text()
+                if page_text:
+                    texts.append(page_text)
+        text = "\n".join(texts)
+    except Exception as e:
+        return FetchResult(url=url, status="extract_failed",
+                           error=f"pdfplumber : {e.__class__.__name__}: {e}")
+
+    if len(text.strip()) < MIN_TEXT_CHARS:
+        return FetchResult(url=url, status="extract_failed",
+                           error=f"PDF sans texte exploitable (< {MIN_TEXT_CHARS} caractères)")
+    title = title_hint or Path(urlparse(url).path).name or url
+    return FetchResult(url=url, status="ok", canonical_url=url,
+                       content_type="application/pdf", raw_text=text, title=title[:200])
+
+
+def fetch_pdf(url: str, session: requests.Session, robots: RobotsCache) -> FetchResult:
+    allowed, reason = robots.allowed(url)
+    if not allowed:
+        return FetchResult(url=url, status="blocked_robots", error=reason)
+
+    time.sleep(REQUEST_DELAY_S)
+    body, err, ctype, canonical = _download_bounded(url, session, MAX_PDF_BYTES, PDF_TIMEOUT_S)
+    if body is None:
+        return FetchResult(url=url, status="http_error", error=err,
+                           canonical_url=canonical, content_type=ctype)
+    if b"%PDF" not in body[:1024]:
+        return FetchResult(url=url, status="invalid_content",
+                           error=f"le contenu n'est pas un PDF ({ctype})",
+                           canonical_url=canonical, content_type=ctype)
+    return extract_pdf_bytes(body, canonical or url)
+
+
+def fetch_local_pdf(path: Path) -> FetchResult:
+    """PDF local : pas de réseau, même validation de contenu."""
+    url = f"local:{path.name}"
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        return FetchResult(url=url, status="http_error", error=f"lecture impossible : {e}")
+    if b"%PDF" not in data[:1024]:
+        return FetchResult(url=url, status="invalid_content", error="fichier local non-PDF")
+    return extract_pdf_bytes(data, url, title_hint=path.stem)

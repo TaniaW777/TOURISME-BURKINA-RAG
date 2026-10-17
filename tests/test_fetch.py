@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -16,6 +18,8 @@ from ingestion.fetch import (  # noqa: E402
     MAX_HTML_BYTES,
     RobotsCache,
     USER_AGENT,
+    extract_pdf_bytes,
+    fetch_local_pdf,
     fetch_web,
     resp_encoding_fallback,
 )
@@ -161,6 +165,49 @@ class TestEncodingFallback:
 # ──────────────────────────────────────────────
 # PDF — validation du contenu et échecs propres
 # ──────────────────────────────────────────────
+@pytest.fixture(scope="module")
+def minimal_pdf() -> bytes:
+    """PDF minimal mais valide, généré avec pdfplumber s'il est disponible,
+    sinon fixture binaire construite à la main."""
+    try:
+        import io
+
+        from reportlab.pdfgen import canvas  # type: ignore
+
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf)
+        c.drawString(100, 750, "Les ruines de Lorpéni au Burkina Faso sont un site majeur.")
+        c.drawString(100, 730, "Les cascades de Banfora et le festival FESPACO attirent les visiteurs.")
+        c.drawString(100, 710, "Le parc du W et la mare aux hippopotames de Bala sont protégés.")
+        c.drawString(100, 690, "Ouagadougou accueille le SIAO, salon international de l'artisanat.")
+        c.drawString(100, 670, "Bobo-Dioulasso est réputée pour sa grande mosquée et sa musique.")
+        c.save()
+        return buf.getvalue()
+    except ImportError:
+        pytest.skip("reportlab absent : fixture PDF non générable")
+
+
+class TestPdf:
+    def test_valid_pdf_extracted(self, minimal_pdf):
+        result = extract_pdf_bytes(minimal_pdf, "https://x.bf/doc.pdf", "Doc")
+        assert result.ok
+        assert "Burkina" in result.raw_text or len(result.raw_text) > 20
+
+    def test_non_pdf_bytes_rejected(self):
+        result = extract_pdf_bytes(b"ceci n'est pas un pdf", "https://x.bf/fake.pdf")
+        assert not result.ok  # extract_failed : échec explicite, pas de contenu vide
+
+    def test_local_pdf_nonexistent(self):
+        result = fetch_local_pdf(Path("Z:/inexistant.pdf"))
+        assert not result.ok and result.error
+
+    def test_local_pdf_wrong_type(self, tmp_path):
+        p = tmp_path / "note.pdf"
+        p.write_text("pas un pdf", encoding="utf-8")
+        result = fetch_local_pdf(p)
+        assert result.status == "invalid_content"
+
+
 # ──────────────────────────────────────────────
 # Invariants de politique
 # ──────────────────────────────────────────────
