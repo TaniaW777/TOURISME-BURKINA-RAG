@@ -207,7 +207,8 @@ class TourismRAGPipelineV2:
             "sources": [c.url for c in result.cited_chunks],
             "retrieved_docs": [
                 {"text": c.text, "url": c.url, "title": c.title,
-                 "source_type": c.source_type, "similarity": c.similarity}
+                 "source_type": c.source_type, "language": c.language,
+                 "trust": c.trust, "similarity": c.similarity}
                 for c in chunks
             ],
             "response_time": round(time.time() - start, 2),
