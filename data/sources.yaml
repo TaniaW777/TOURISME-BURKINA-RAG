@@ -1,0 +1,168 @@
+# ============================================================
+# TOURISME BURKINA RAG — liste curée des sources (Phase 2)
+# ------------------------------------------------------------
+# Toute source scrapée DOIT figurer ici : pas de crawl incontrôlé,
+# pas d'URL ajoutée en cours de route sans entrée dans ce fichier.
+#
+# Champs :
+#   url    : URL canonique à récupérer
+#   type   : web | pdf
+#   trust  : institutional | encyclopedia | press | blog
+#            (utilisé pour départager des preuves contradictoires)
+#   notes  : commentaire libre (optionnel)
+#
+# robots.txt est respecté pour TOUTES les sources, sans exception
+# ni liste blanche de contournement. SSL vérifié systématiquement.
+# ============================================================
+
+sources:
+  # ── Encyclopédies (FR) ──
+  - url: https://fr.wikipedia.org/wiki/Tourisme_au_Burkina_Faso
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/Ruines_de_Lorop%C3%A9ni
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/Banfora
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/Cascades_de_Banfora
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/Pics_de_Sindou
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/Laongo
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/Bobo-Dioulasso
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/Ouagadougou
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/FESPACO
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/R%C3%A9serve_de_Nazinga
+    type: web
+    trust: encyclopedia
+    notes: titre vérifié via l'API Wikipedia (l'ancien "Nazinga" renvoie 404)
+  - url: https://fr.wikipedia.org/wiki/Mare_aux_Hippopotames_de_la_r%C3%A9gion_des_Hauts-Bassins_au_Burkina_-_Faso
+    type: web
+    trust: encyclopedia
+    notes: titre vérifié via l'API Wikipedia (l'ancien titre renvoyait 404)
+  - url: https://fr.wikipedia.org/wiki/Parc_du_W
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikipedia.org/wiki/Parc_national_d%27Arly
+    type: web
+    trust: encyclopedia
+
+  # ── Encyclopédies de voyage (FR + EN, l'EN sert de preuve complémentaire) ──
+  - url: https://fr.wikivoyage.org/wiki/Burkina_Faso
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikivoyage.org/wiki/Ouagadougou
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikivoyage.org/wiki/Bobo-Dioulasso
+    type: web
+    trust: encyclopedia
+  - url: https://fr.wikivoyage.org/wiki/Banfora
+    type: web
+    trust: encyclopedia
+  - url: https://en.wikivoyage.org/wiki/Burkina_Faso
+    type: web
+    trust: encyclopedia
+    notes: source anglophone — preuve de secours, réponses toujours en FR
+  - url: https://en.wikivoyage.org/wiki/Ouagadougou
+    type: web
+    trust: encyclopedia
+    notes: source anglophone
+  - url: https://en.wikivoyage.org/wiki/Bobo-Dioulasso
+    type: web
+    trust: encyclopedia
+    notes: source anglophone
+
+  # ── Institutionnels ──
+  - url: https://www.presidencedufaso.bf/opportunites-touristiques/
+    type: web
+    trust: institutional
+  - url: https://www.burkinatourism.com/
+    type: web
+    trust: institutional
+  - url: https://www.embassy-bf.org/cultures-et-tourisme/
+    type: web
+    trust: institutional
+  - url: https://www.ambabf-afriquedusud.gov.bf/index.php/fr/burkina-faso/culture-et-tourisme
+    type: web
+    trust: institutional
+  - url: https://ich.unesco.org/fr/listes?q=burkina+faso
+    type: web
+    trust: institutional
+  - url: https://www.investburkina.bf/2022_09_21_REGROUPEMENT%20DES%20TEXTES%20VF/9%20TOURRISME%20ET%20HOTELERIE/LOI/Loi%20N%C2%B0011-2021AN%20du%2016%20avril%202021%20portant%20loi%20d%E2%80%99orientation%20du%20tourisme%20au%20Burkina%20Faso.pdf
+    type: pdf
+    trust: institutional
+    notes: loi d'orientation du tourisme
+  - url: https://museenational.bf/wp-content/uploads/2025/01/Offres-et-services-du-Musee-National.pdf
+    type: pdf
+    trust: institutional
+    notes: offres du Musée National
+
+  # ── Presse ──
+  - url: https://lefaso.net/spip.php?article123907
+    type: web
+    trust: press
+  - url: https://lefaso.net/spip.php?article139606
+    type: web
+    trust: press
+  - url: https://lefaso.net/spip.php?article17427
+    type: web
+    trust: press
+  - url: https://www.lefaso.net/spip.php?rubrique=tourisme
+    type: web
+    trust: press
+  - url: https://sentinellebf.com/burkina-faso-lontb-devient-faso-tourisme/
+    type: web
+    trust: press
+
+  # ── Blogs / récits de voyage ──
+  - url: https://www.chicfaso.com/fr
+    type: web
+    trust: blog
+  - url: https://lesvoyageusesduquebec.com/voyage-au-burkina-faso-que-faire-et-visiter/
+    type: web
+    trust: blog
+  - url: https://cultureburkinabe.family.blog/2020/01/18/sites-touristiques-du-burkina-2/
+    type: web
+    trust: blog
+  - url: https://www.tourisme-equitable.org/destinations/burkina-faso/
+    type: web
+    trust: blog
+  - url: https://baobab-gourmantche.over-blog.com/2013/12/le-tour-du-lac.html
+    type: web
+    trust: blog
+  - url: https://www.lonelyplanet.com/destinations/burkina-faso
+    type: web
+    trust: blog
+  - url: https://www.partir.com/Burkina-faso/
+    type: web
+    trust: blog
+  - url: https://www.partir.com/Burkina-faso/lieux-d-interet.html
+    type: web
+    trust: blog
+
+  # ── Éducation ──
+  - url: https://fasoeducation.bf/cours_esu/secondaire/terminale/hg/geographie/secteur_tertiaire_transports_commerce_tourisme_telecommunications/co/grain_caractour.html
+    type: web
+    trust: institutional
+    notes: contenu pédagogique officiel burkinabè
+
+# ── PDFs locaux (déjà présents dans data/pdfs/, non re-téléchargés) ──
+local_pdfs:
+  dir: data/pdfs
+  trust: institutional
+  # archive/ est exclue (documents administratifs hors périmètre touristique,
+  # cf. audit : filtrage déjà opéré dans l'ancien scraping_script)
+  exclude_subdirs: [archive]
