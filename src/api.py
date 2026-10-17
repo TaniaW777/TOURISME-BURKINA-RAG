@@ -31,9 +31,13 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from loguru import logger
 
-# Import du pipeline RAG
+# Pipelines : v2 (Groq) par défaut, legacy (Ollama) pendant la transition.
+# Aucun repli silencieux : un provider absent/invalidé = mode dégradé.
 import sys
 sys.path.insert(0, ".")
+from src.config import load_settings
+from src.pipeline import TourismRAGPipelineV2, basic_readiness, provider_probe
+from src.pipeline import TourismRAGPipelineV2 as _V2Pipeline  # alias non patché pour isinstance
 from src.rag_pipeline import TourismRAGPipeline
 
 
@@ -44,7 +48,8 @@ from src.rag_pipeline import TourismRAGPipeline
 limiter = Limiter(key_func=get_remote_address)
 
 # Variable globale du pipeline (singleton, chargé au démarrage)
-pipeline: TourismRAGPipeline | None = None
+pipeline: TourismRAGPipeline | TourismRAGPipelineV2 | None = None
+startup_problems: list[str] = []
 
 
 # ──────────────────────────────────────────────
@@ -52,16 +57,27 @@ pipeline: TourismRAGPipeline | None = None
 # ──────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Charge le pipeline RAG une seule fois au démarrage.
-    Évite de recharger le modèle d'embeddings à chaque requête.
-    """
-    global pipeline
-    logger.info("Chargement pipeline RAG au démarrage...")
-    pipeline = TourismRAGPipeline()
-    logger.success("Pipeline RAG prêt.")
+    """Charge le pipeline sélectionné par LLM_PROVIDER, EN MODE DÉGRADÉ en cas
+    d'échec : l'app démarre toujours, /health diagnostique, /query répond 503.
+    Aucun repli silencieux d'un provider vers l'autre."""
+    global pipeline, startup_problems
+    settings = load_settings()
+    startup_problems = []
+    try:
+        if settings.llm_provider == "legacy":
+            logger.warning("LLM_PROVIDER=legacy : pipeline Ollama historique.")
+            pipeline = TourismRAGPipeline()
+        else:
+            logger.info("Initialisation pipeline v2 (Groq)...")
+            v2 = TourismRAGPipelineV2(settings=settings)
+            v2.initialize()
+            pipeline = v2
+        logger.success("Pipeline prêt.")
+    except Exception as e:  # dégradé : diagnostic, pas de crash-loop
+        pipeline = None
+        startup_problems = [f"{e.__class__.__name__}: {str(e)[:200]}"]
+        logger.error(f"Démarrage DÉGRADÉ : {startup_problems[0]}")
     yield
-    # Cleanup au shutdown (rien de spécial ici)
     logger.info("Arrêt API.")
 
 
@@ -174,10 +190,15 @@ class StatsResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Health check."""
+    """Health check — configuration SANS réseau ; la sonde provider est
+    séparée (GET /health/provider), explicite et bornée."""
     status: str
     pipeline_ready: bool
     timestamp: float
+    provider: str = "unknown"
+    groq_configured: bool = False
+    index_manifest_ok: bool = False
+    problems: list[str] = []
 
 
 # ──────────────────────────────────────────────
@@ -189,11 +210,24 @@ async def health_check():
     Vérifie que l'API et le pipeline sont opérationnels.
     Utilisé par les health checks de déploiement.
     """
+    readiness = basic_readiness()
+    ready = pipeline is not None and readiness.pipeline_ready
     return HealthResponse(
-        status="ok" if pipeline is not None else "loading",
-        pipeline_ready=pipeline is not None,
+        status="ok" if ready else ("degraded" if pipeline is None else "error"),
+        pipeline_ready=ready,
         timestamp=time.time(),
+        provider=readiness.provider,
+        groq_configured=readiness.groq_configured,
+        index_manifest_ok=readiness.index_manifest_ok,
+        problems=readiness.problems + startup_problems,
     )
+
+
+@app.get("/health/provider", tags=["Monitoring"])
+async def health_provider():
+    """Sonde provider EXPLICITE : un appel réseau réel (models.list), borné.
+    À appeler à la demande et mettre en cache — pas sur chaque /health."""
+    return provider_probe()
 
 
 @app.post("/query", response_model=QueryResponse, tags=["RAG"])
@@ -218,7 +252,7 @@ async def query_rag(request: Request, body: QueryRequest):
 
     try:
         # Appel au pipeline RAG
-        result = pipeline.query(body.question)
+        result = pipeline.query(body.question, top_k=body.top_k)
 
         # Formate les documents pour la réponse API
         docs_formatted = [
@@ -250,12 +284,20 @@ async def query_rag(request: Request, body: QueryRequest):
 @app.post("/index", response_model=IndexResponse, tags=["Administration"])
 async def index_corpus(request: Request):
     """
-    (Re)indexe le corpus dans ChromaDB.
-    Appelle cet endpoint après un nouveau scraping.
-    Note : En production, protège cet endpoint avec authentification.
+    (Re)indexe le corpus dans ChromaDB — CHEMIN LEGACY UNIQUEMENT.
+    Le pipeline v2 ne construit JAMAIS d'index au runtime : la reconstruction
+    est une opération hors-ligne explicite (python scripts/build_index.py).
     """
     if pipeline is None:
         raise HTTPException(status_code=503, detail="Pipeline non prêt")
+
+    if isinstance(pipeline, _V2Pipeline):
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Indexation hors périmètre du pipeline v2 : reconstruire "
+                   "hors-ligne via `python scripts/build_index.py` (le manifeste "
+                   "est vérifié au démarrage du retriever).",
+        )
 
     try:
         count = pipeline.index()
@@ -276,10 +318,18 @@ async def get_stats():
     if pipeline is None:
         raise HTTPException(status_code=503, detail="Pipeline non prêt")
 
+    settings = load_settings()
+    if isinstance(pipeline, _V2Pipeline):
+        return StatsResponse(
+            total_documents=pipeline._retriever._collection.count(),
+            collection_name=pipeline._retriever.manifest["collection_name"],
+            embedding_model=settings.embedding_model,
+            llm_model=f"groq:{settings.groq_model}",
+        )
     count = pipeline.vector_store.collection.count()
     return StatsResponse(
         total_documents=count,
         collection_name=pipeline.vector_store.collection.name,
-        embedding_model="BAAI/bge-m3",
-        llm_model="qwen2.5:7b-instruct",
+        embedding_model=settings.embedding_model,
+        llm_model="legacy-ollama",
     )
