@@ -65,6 +65,7 @@ class Settings:
     """
 
     # ── LLM (Groq) ──
+    llm_provider: str = "groq"      # groq (v2) | legacy (Ollama, transition)
     groq_api_key: str = ""          # vide = mode dégradé (voir groq_configured)
     groq_model: str = DEFAULT_GROQ_MODEL
     groq_timeout_s: float = 20.0    # timeout par requête, borné aussi côté client
@@ -123,6 +124,9 @@ class Settings:
             problems.append(f"MIN_SIMILARITY invalide : {self.min_similarity} (attendu 0.0-1.0)")
         if not self.embedding_model.strip():
             problems.append("EMBEDDING_MODEL vide.")
+        if self.llm_provider not in ("groq", "legacy"):
+            problems.append(f"LLM_PROVIDER invalide : {self.llm_provider!r} "
+                            "(groq | legacy)")
         return problems
 
 
@@ -145,6 +149,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
 
     return Settings(
         # Groq — jamais loguée, jamais exposée côté client
+        llm_provider   =get("LLM_PROVIDER", "groq").strip().lower(),
         groq_api_key   =get("GROQ_API_KEY", ""),
         groq_model     =get("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip(),
         groq_timeout_s =gflt("GROQ_TIMEOUT_S", 20.0),

@@ -20,16 +20,28 @@ sys.path.insert(0, ".")
 import gradio as gr
 from loguru import logger
 
-# Import du pipeline RAG
-from src.rag_pipeline import TourismRAGPipeline
+# Pipeline v2 (Groq) — chargé PARESSEUSEMENT à la première question :
+# aucun modèle/index n'est construit à l'import, et l'index n'est JAMAIS
+# reconstruit ici (lecture du v2 manifesté). Pas de repli Ollama silencieux.
+from src.pipeline import PipelineError, TourismRAGPipelineV2
 
-# ──────────────────────────────────────────────
-# Initialisation du pipeline (une seule fois)
-# ──────────────────────────────────────────────
-logger.info("Initialisation pipeline pour interface Gradio...")
-pipeline = TourismRAGPipeline()
-pipeline.index()  # Indexe si pas encore fait
-logger.success("Interface prête.")
+pipeline = None
+_pipeline_error: str | None = None
+
+
+def _get_pipeline():
+    """Initialisation explicite à la demande ; None + message en mode dégradé."""
+    global pipeline, _pipeline_error
+    if pipeline is None and _pipeline_error is None:
+        try:
+            p = TourismRAGPipelineV2()
+            p.initialize()
+            pipeline = p
+            logger.success("Pipeline v2 prêt.")
+        except Exception as e:
+            _pipeline_error = f"{e.__class__.__name__}: {e}"
+            logger.error(f"Pipeline v2 non initialisable : {_pipeline_error}")
+    return pipeline
 
 # ──────────────────────────────────────────────
 # EXEMPLES DE QUESTIONS
