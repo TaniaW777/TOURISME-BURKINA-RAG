@@ -1,0 +1,12 @@
+﻿FROM qwen2.5:3b
+
+# Context window fixé à 1024 — suffisant pour notre RAG (600 tokens max)
+PARAMETER num_ctx 1024
+
+# Temperature basse — moins d'hallucinations
+PARAMETER temperature 0.1
+
+# Stop sequences — arrête après les bullet points
+PARAMETER stop "QUESTION"
+PARAMETER stop "SOURCES"
+PARAMETER stop "---"

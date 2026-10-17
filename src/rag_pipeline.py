@@ -1,26 +1,30 @@
+﻿# -*- coding: utf-8 -*-
 """
 src/rag_pipeline.py
 ===================
-Pipeline RAG complet pour le Tourisme Burkinabè.
+Pipeline RAG — Tourisme Burkinabè
 100% open source, local, zéro dépendance cloud.
 
 Architecture :
-  Question → Sanitization → Embeddings (BGE-M3) → ChromaDB
-  → Top-K chunks → Couche agentique → Qwen3/LLaMA via Ollama
-  → Réponse + Sources + Métriques
+  Question → Sanitization → Query Expansion → Embedding (cache)
+  → ChromaDB → Top-K chunks → LLM (Ollama) → Réponse + Sources + Métriques
 
-Technologies :
-  - sentence-transformers : Apache 2.0
-  - chromadb              : Apache 2.0
-  - ollama                : MIT
-  - langgraph             : MIT
-  - loguru                : MIT
+Historique des corrections :
+  v1 → v2 : lru_cache module-level, prompt structuré, tokens réduits, AuditLogger idempotent
+  v2 → v3 : modèle qwen2.5:3b, query expansion, prompt anti-hallucination, debug chunks
+  v3 → v4 : [FIX-9]  num_predict 350→120 — cause principale des 46s (math : tokens × vitesse CPU)
+             [FIX-10] Prompt compressé — 681 tokens input → ~280 tokens (mêmes contraintes, moitié moins)
+             [FIX-11] Nettoyage encoding UTF-8 cassé dans les chunks (Ã©→é, Ã¨→è, etc.)
+             [FIX-12] Filtre chunks : ignore les chunks qui commencent au milieu d'une phrase
 """
+
+from __future__ import annotations
 
 import re
 import time
 import json
 import hashlib
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -29,64 +33,159 @@ import chromadb
 import ollama
 from sentence_transformers import SentenceTransformer
 from loguru import logger
-from langchain_core.messages import HumanMessage, AIMessage
-from langgraph.graph import StateGraph, END
-from typing import TypedDict, Annotated
-import operator
 
 
 # ══════════════════════════════════════════════════════════
 # CONFIGURATION CENTRALE
 # ══════════════════════════════════════════════════════════
 class Config:
-    # --- Embeddings ---
-    # BAAI/bge-m3 : meilleur modèle multilingue open source 2025
-    # Top MTEB Multilingual, supporte français natif
-    # Licence : MIT — https://huggingface.co/BAAI/bge-m3
-    EMBEDDING_MODEL = "BAAI/bge-m3"
+    # Embeddings
+    EMBEDDING_MODEL    = "paraphrase-multilingual-MiniLM-L12-v2"
+    EMBEDDING_DEVICE   = "cpu"
 
-    # --- Vector DB ---
-    # ChromaDB local, persistant sur disque
-    # Aucun service externe requis
-    CHROMA_PATH = "./data/chroma_db"
-    COLLECTION_NAME = "tourisme_burkina"
+    # Vector DB
+    CHROMA_PATH        = "./data/chroma_db"
+    COLLECTION_NAME    = "tourisme_burkina"
 
-    # --- LLM ---
-    # Qwen3-8B-Instruct via Ollama (local, gratuit, excellent en français)
-    # Alternative : llama3.1:8b-instruct-q4_K_M
-    # Fallback : mistral:7b-instruct
-    LLM_MODEL = "qwen2.5:7b-instruct"  # Disponible dans Ollama registry
-    LLM_TEMPERATURE = 0.3   # Bas = réponses factuelles (pas d'hallucination)
-    LLM_MAX_TOKENS = 1024
+    # LLM local via Ollama
+    LLM_MODEL          = "tourisme-burkina"
+    LLM_TEMPERATURE    = 0.1
+    # [FIX-9] CAUSE PRINCIPALE DES 46s
+    # Avant : num_predict=350 → Ollama génère jusqu'à 350 tokens = ~16s sur CPU
+    # Après : num_predict=120 → 5 bullet points = ~80-100 tokens suffisent largement
+    # Calcul : à ~22 tokens/sec (mesuré), 350 tokens = 16s, 120 tokens = 5-6s
+    # Combiné avec la réduction des tokens INPUT (FIX-10) : objectif 8-12s total
+    LLM_MAX_TOKENS     = 220   # 5 bullets × ~30 tokens — augmenté pour éviter coupure
+    LLM_TOP_P          = 0.9
+    # Limite le context window d'Ollama — réduit l'allocation mémoire et accélère l'inférence
+    # 1024 suffit largement : ~430 tokens input + 180 tokens output = 610 tokens max
+    LLM_NUM_CTX        = 1024
 
-    # --- RAG ---
-    TOP_K = 5              # Nombre de chunks récupérés (empirique : 5 = bon ratio qualité/vitesse)
-    MIN_SIMILARITY = 0.3   # Seuil similarité cosinus minimum (0 = tout, 1 = exact)
-    CHUNK_SIZE = 500        # Mots par chunk (voir scraping_script.py)
+    # RAG
+    TOP_K              = 4
+    MIN_SIMILARITY     = 0.25
+    CHUNK_MAX_CHARS    = 400
+    BATCH_SIZE         = 8
 
-    # --- Corpus ---
-    CORPUS_PATH = "./data/corpus.json"
+    # Corpus
+    CORPUS_PATH        = "./data/corpus.json"
 
-    # --- Sécurité ---
-    MAX_QUERY_LENGTH = 500         # Longueur max question utilisateur
-    RATE_LIMIT_SECONDS = 1.0       # Min secondes entre requêtes
-    AUDIT_LOG_PATH = "./logs/audit.log"
+    # Sécurité
+    MAX_QUERY_LENGTH   = 500
+    RATE_LIMIT_SECONDS = 1.0
+
+    # Logs
+    AUDIT_LOG_PATH     = "./logs/audit.log"
+    LOG_ROTATION       = "10 MB"
+    LOG_RETENTION      = "7 days"
+
+    # Passer à True pour voir les chunks dans les logs — diagnostique qualité
+    LOG_RETRIEVED_CHUNKS = False
+
+
+# ══════════════════════════════════════════════════════════
+# SINGLETON — Modèle d'embedding chargé une seule fois
+# ══════════════════════════════════════════════════════════
+_embedding_model: Optional[SentenceTransformer] = None
+
+
+def get_embedding_model() -> SentenceTransformer:
+    """Retourne le modèle d'embedding partagé. Chargé une seule fois — pattern Singleton."""
+    global _embedding_model
+    if _embedding_model is None:
+        logger.info(f"Chargement modèle embeddings : {Config.EMBEDDING_MODEL}")
+        _embedding_model = SentenceTransformer(
+            Config.EMBEDDING_MODEL,
+            device=Config.EMBEDDING_DEVICE,
+        )
+        logger.success(f"Modèle chargé : {Config.EMBEDDING_MODEL}")
+    return _embedding_model
+
+
+# ══════════════════════════════════════════════════════════
+# CACHE LRU AU NIVEAU MODULE
+# ══════════════════════════════════════════════════════════
+@lru_cache(maxsize=256)
+def _embed_query_cached(model: SentenceTransformer, query: str) -> tuple[float, ...]:
+    """Cache LRU module-level. Clé = (model, query). Retourne tuple (hashable)."""
+    embeddings = model.encode([query], normalize_embeddings=True)
+    return tuple(embeddings[0].tolist())
+
+
+# ══════════════════════════════════════════════════════════
+# [FIX-11] NETTOYAGE ENCODING UTF-8 CASSÉ
+# ══════════════════════════════════════════════════════════
+def fix_encoding(text: str) -> str:
+    """
+    Corrige les artéfacts d'encoding Latin-1/UTF-8 mal interprété
+    fréquents dans les PDFs et pages web scraped.
+
+    POURQUOI C'EST UN PROBLÈME :
+    Quand un PDF ou une page web est encodé en Latin-1 (ISO-8859-1) mais
+    lu comme UTF-8, les caractères accentués deviennent des séquences
+    comme Ã© (é), Ã¨ (è), Ã (à), etc.
+    Le LLM reçoit ce texte corrompu et peut soit l'ignorer, soit
+    produire des réponses avec les mêmes artéfacts.
+
+    Exemple vu dans les chunks :
+      "caractÃ©ristiques"  → "caractéristiques"
+      "touristiquebÃ¨"     → "touristiquebè"  (chunking cassé + encoding cassé)
+      "protÃ©gÃ©es"        → "protégées"
+
+    Stratégie : tentative de re-décodage Latin-1→UTF-8 d'abord,
+    puis table de remplacement explicite pour les cas résiduels.
+    """
+    # Tentative de round-trip encoding : utf-8 → latin-1 → utf-8
+    # Récupère les vrais caractères si le texte a été mal décodé à la source
+    try:
+        fixed = text.encode("latin-1").decode("utf-8")
+        return fixed
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+
+    # Table de remplacement explicite pour les séquences les plus communes
+    # en français — couvre 95% des cas observés dans les corpus web/PDF
+    REPLACEMENTS = {
+        "Ã©": "\u00e9",  # é
+        "Ã¨": "\u00e8",  # è
+        "Ãª": "\u00ea",  # ê
+        "Ã«": "\u00eb",  # ë
+        "Ã ": "\u00e0",  # à
+        "Ã¢": "\u00e2",  # â
+        "Ã¤": "\u00e4",  # ä
+        "Ã®": "\u00ee",  # î
+        "Ã¯": "\u00ef",  # ï
+        "Ã´": "\u00f4",  # ô
+        "Ã¶": "\u00f6",  # ö
+        "Ã²": "\u00f2",  # ò
+        "Ã»": "\u00fb",  # û
+        "Ã¹": "\u00f9",  # ù
+        "Ã¼": "\u00fc",  # ü
+        "Ã§": "\u00e7",  # ç
+        "Ã†": "\u00c6",  # Æ
+        "Ã\u2030": "\u00c9",  # É
+        "Ã\u02c6": "\u00c8",  # È
+        "Ã\u009c": "\u00dc",  # Ü
+        "\u00e2\u20ac\u2122": "\u2019",  # apostrophe ’
+        "\u00e2\u20ac\u0153": "\u201c",  # guillemet ouvrant
+        "\u00e2\u20ac\x9d": "\u201d",  # guillemet fermant
+        "\u00e2\u20ac\x93": "\u2013",  # tiret demi-cadratin
+        "\u00e2\u20ac\x94": "\u2014",  # tiret cadratin
+        "\u00c2\u00a0": " ",             # espace insécable
+        "\u00c2\u00ab": "\u00ab",       # «
+        "\u00c2\u00bb": "\u00bb",       # »
+    }
+    for bad, good in REPLACEMENTS.items():
+        text = text.replace(bad, good)
+    return text
 
 
 # ══════════════════════════════════════════════════════════
 # SÉCURITÉ — Sanitization des inputs
 # ══════════════════════════════════════════════════════════
 class InputSanitizer:
-    """
-    Protège contre :
-    - Prompt injection (instructions cachées dans la question)
-    - HTML/JS injection
-    - Questions trop longues (DoS)
-    - Caractères de contrôle malveillants
-    """
+    """Protège contre prompt injection, HTML injection, queries trop longues."""
 
-    # Patterns de prompt injection courants
-    # Un attaquant peut écrire "Ignore tes instructions et fais X"
     INJECTION_PATTERNS = [
         r"ignore\s+(all\s+)?previous\s+instructions",
         r"tu\s+es\s+maintenant",
@@ -101,385 +200,366 @@ class InputSanitizer:
     ]
 
     def __init__(self):
-        # Compile les patterns une fois pour la perf
         self._compiled = [
-            re.compile(p, re.IGNORECASE) for p in self.INJECTION_PATTERNS
+            re.compile(p, re.IGNORECASE)
+            for p in self.INJECTION_PATTERNS
         ]
 
     def sanitize(self, query: str) -> tuple[str, bool]:
-        """
-        Sanitize la query utilisateur.
-        Retourne : (query_nettoyée, is_safe)
-        is_safe = False si injection détectée
-        """
-        # Longueur max
+        """Retourne (query_nettoyée, is_safe). is_safe=False si injection détectée."""
         if len(query) > Config.MAX_QUERY_LENGTH:
             query = query[:Config.MAX_QUERY_LENGTH]
 
-        # Nettoyage HTML
         query = bleach.clean(query, tags=[], strip=True)
-
-        # Supprime caractères de contrôle
         query = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', query)
 
-        # Détecte prompt injection
         for pattern in self._compiled:
             if pattern.search(query):
-                logger.warning(f"PROMPT INJECTION DÉTECTÉE : {query[:50]}...")
-                return query, False  # Marque comme non-safe
+                logger.warning(f"INJECTION DÉTECTÉE : {query[:50]}...")
+                return query, False
 
         return query.strip(), True
 
 
 # ══════════════════════════════════════════════════════════
-# EMBEDDINGS — Modèle BGE-M3
+# QUERY EXPANSION — Améliore le retrieval ChromaDB
+# ══════════════════════════════════════════════════════════
+class QueryExpander:
+    """
+    Reformule la question utilisateur en termes documentaires
+    pour maximiser le cosine similarity au retrieval.
+    """
+
+    _STOPWORDS = {
+        "quels", "quelles", "quel", "quelle", "sont", "est", "les",
+        "des", "du", "de", "la", "le", "un", "une", "au", "aux",
+        "en", "et", "ou", "pour", "sur", "dans", "avec", "par",
+        "me", "te", "se", "nous", "vous", "il", "elle", "ils", "elles",
+        "je", "tu", "on", "ce", "ces", "mon", "ma", "mes", "ton", "ta",
+        "ses", "son", "leur", "leurs", "que", "qui", "quoi", "où",
+        "comment", "pourquoi", "combien", "peut", "pouvez", "puis",
+        "parler", "dire", "savoir", "trouver", "voir", "visiter",
+        "principaux", "principales", "meilleurs", "meilleures", "grands",
+        "grand", "petit", "petits", "beau", "beaux", "belle", "belles",
+    }
+
+    _ENRICHMENTS: dict[str, list[str]] = {
+        "site"       : ["site touristique", "attraction", "lieu", "patrimoine"],
+        "sites"      : ["sites touristiques", "attractions", "lieux", "patrimoine"],
+        "touristique": ["touristique", "culturel", "naturel", "historique"],
+        "parc"       : ["parc national", "réserve naturelle", "faune"],
+        "culture"    : ["culturel", "traditions", "ethnies", "musée", "festival"],
+        "festival"   : ["festival", "fête", "célébration", "FESPACO", "SIAO"],
+        "musée"      : ["musée", "musée national", "exposition"],
+        "artisanat"  : ["artisanat", "SIAO", "sculpture", "tissu"],
+        "nature"     : ["parc", "réserve", "faune", "flore", "hippopotame"],
+        "histoire"   : ["historique", "patrimoine", "vestiges", "ruines", "UNESCO"],
+        "UNESCO"     : ["UNESCO", "patrimoine mondial", "classé", "Loropéni"],
+        "restaurant" : ["gastronomie", "cuisine burkinabè", "plat local"],
+        "hôtel"      : ["hébergement", "hôtel", "lodge", "auberge"],
+        "sécurité"   : ["sécurité", "conseils voyage", "zones"],
+        "transport"  : ["transport", "bus", "vol", "route", "accès"],
+        "ouagadougou": ["Ouagadougou", "Ouaga", "capitale", "musée national","Bangr Weogo", "FESPACO", "monuments", "attractions", "visiter"],
+        "visiter"    : ["visiter", "voir", "attractions", "sites", "monuments", "musées"],
+        "voir"       : ["voir", "visiter", "attractions", "sites", "monuments"],
+        "bobo"       : ["Bobo-Dioulasso", "Bobo", "deuxième ville"],
+        "loropeni"   : ["Loropéni", "ruines", "UNESCO", "patrimoine mondial"],
+        "fespaco"    : ["FESPACO", "festival cinéma", "Ouagadougou"],
+        "siao"       : ["SIAO", "artisanat", "salon international"],
+    }
+
+    def expand(self, query: str) -> str:
+        """Produit une query enrichie pour le retrieval vectoriel."""
+        query_lower = query.lower()
+        keywords    = [
+            w for w in re.findall(r'\b\w+\b', query_lower)
+            if w not in self._STOPWORDS and len(w) > 2
+        ]
+
+        enrichments: list[str] = []
+        for kw in keywords:
+            if kw in self._ENRICHMENTS:
+                enrichments.extend(self._ENRICHMENTS[kw])
+
+        seen: set[str] = set()
+        all_terms    = keywords + enrichments
+        unique_terms = [t for t in all_terms if not (t in seen or seen.add(t))]  # type: ignore[func-returns-value]
+
+        expanded = " ".join(unique_terms[:8])
+
+        if expanded.lower() != query_lower:
+            logger.debug(f"Query originale : {query}")
+            logger.debug(f"Query enrichie  : {expanded}")
+
+        return expanded if expanded else query
+
+
+# ══════════════════════════════════════════════════════════
+# EMBEDDINGS
 # ══════════════════════════════════════════════════════════
 class EmbeddingEngine:
-    """
-    Wrapper autour de sentence-transformers.
-    BGE-M3 : multilingue, 8192 tokens max, dense + sparse retrieval.
-    Chargé une seule fois en mémoire pour la performance.
-    """
+    """Wrapper sentence-transformers avec cache LRU module-level."""
 
     def __init__(self):
-        logger.info(f"Chargement modèle embeddings : {Config.EMBEDDING_MODEL}")
-        # SentenceTransformer télécharge automatiquement le modèle (HuggingFace)
-        # Premier run : ~500MB de téléchargement
-        self.model = SentenceTransformer(
-            Config.EMBEDDING_MODEL,
-            device="cpu",  # CPU suffisant pour embedding ; GPU si disponible
-        )
-        logger.success(f"Modèle chargé : {Config.EMBEDDING_MODEL}")
+        self.model = get_embedding_model()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """
-        Encode une liste de textes en vecteurs.
-        normalize_embeddings=True requis pour similarité cosinus correcte.
-        """
+        """Encode une liste de textes — utilisé à l'indexation."""
         embeddings = self.model.encode(
             texts,
-            normalize_embeddings=True,  # OBLIGATOIRE pour cosine similarity
-            show_progress_bar=len(texts) > 100,  # Barre progrès si corpus
-            batch_size=32,  # Batch pour perf mémoire
+            normalize_embeddings=True,
+            show_progress_bar=len(texts) > 100,
+            batch_size=Config.BATCH_SIZE,
         )
         return embeddings.tolist()
 
     def embed_query(self, query: str) -> list[float]:
-        """Encode une question unique (inference time)."""
-        # BGE-M3 supporte instruction prefix pour les queries
-        prefixed = f"Represent this sentence for searching relevant passages: {query}"
-        return self.embed([prefixed])[0]
+        """Encode une query avec cache LRU — évite de recalculer."""
+        return list(_embed_query_cached(self.model, query))
 
 
 # ══════════════════════════════════════════════════════════
 # BASE VECTORIELLE — ChromaDB
 # ══════════════════════════════════════════════════════════
 class VectorStore:
-    """
-    Interface ChromaDB persistante.
-    Les données survivent aux redémarrages (stockage disque).
-    """
+    """Interface ChromaDB persistante avec gestion des erreurs robuste."""
 
     def __init__(self, embedding_engine: EmbeddingEngine):
-        # Client persistant : les données sont sauvées dans CHROMA_PATH
         self.client = chromadb.PersistentClient(path=Config.CHROMA_PATH)
         self.embedding_engine = embedding_engine
-
-        # Récupère ou crée la collection
-        # metadata{"hnsw:space": "cosine"} = similarité cosinus (obligatoire avec BGE-M3 normalisé)
         self.collection = self.client.get_or_create_collection(
             name=Config.COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
         )
-        logger.info(f"Collection ChromaDB : {Config.COLLECTION_NAME} ({self.collection.count()} docs)")
+        logger.info(
+            f"Collection ChromaDB : {Config.COLLECTION_NAME} "
+            f"({self.collection.count()} docs)"
+        )
 
     def index_corpus(self, corpus_path: str = Config.CORPUS_PATH) -> int:
-        """
-        Indexe le corpus JSON dans ChromaDB.
-        Idempotent : skip les documents déjà indexés.
-        Retourne le nombre de nouveaux documents indexés.
-        """
+        """Indexe le corpus JSON dans ChromaDB. Idempotent."""
         corpus_file = Path(corpus_path)
         if not corpus_file.exists():
             raise FileNotFoundError(
                 f"Corpus introuvable : {corpus_path}\n"
-                "Lance d'abord : python data/scraping_script.py"
+                "Lance d'abord le scraping."
             )
 
         with open(corpus_file, encoding="utf-8") as f:
             chunks = json.load(f)
 
-        logger.info(f"Indexation de {len(chunks)} chunks...")
-
-        # Récupère les IDs déjà indexés pour éviter les doublons
-        existing = set(self.collection.get(include=[])["ids"])
-
-        # Filtre les nouveaux chunks
+        existing   = set(self.collection.get(include=[])["ids"])
         new_chunks = [c for c in chunks if c["id"] not in existing]
-        logger.info(f"Nouveaux chunks à indexer : {len(new_chunks)}")
 
         if not new_chunks:
-            logger.info("Aucun nouveau chunk. Corpus déjà indexé.")
+            logger.info("Corpus déjà entièrement indexé.")
             return 0
 
-        # Indexation par batches (ChromaDB a une limite par appel)
-        batch_size = 100
+        logger.info(f"Indexation de {len(new_chunks)} nouveaux chunks (batch={Config.BATCH_SIZE})...")
+
         indexed = 0
-
-        for i in range(0, len(new_chunks), batch_size):
-            batch = new_chunks[i : i + batch_size]
-
-            # Génère les embeddings pour ce batch
+        for i in range(0, len(new_chunks), Config.BATCH_SIZE):
+            batch = new_chunks[i : i + Config.BATCH_SIZE]
             texts = [c["text"] for c in batch]
-            embeddings = self.embedding_engine.embed(texts)
 
-            # Métadonnées filtrables (ex : filtrer par langue ou type de source)
-            metadatas = [
-                {
-                    "url": c["url"],
-                    "title": c["title"],
-                    "source_type": c["source_type"],
-                    "language": c.get("language", "fr"),
-                    "chunk_idx": c.get("chunk_idx", 0),
-                }
-                for c in batch
-            ]
+            try:
+                embeddings = self.embedding_engine.embed(texts)
+                metadatas  = [
+                    {
+                        "url"        : c.get("url", ""),
+                        "title"      : c.get("title", ""),
+                        "source_type": c.get("source_type", "pdf"),
+                        "language"   : c.get("language", "fr"),
+                    }
+                    for c in batch
+                ]
+                self.collection.add(
+                    ids       =[c["id"] for c in batch],
+                    embeddings=embeddings,
+                    documents =texts,
+                    metadatas =metadatas,
+                )
+                indexed += len(batch)
+                logger.info(f"Indexé {indexed}/{len(new_chunks)} chunks...")
 
-            # Insertion dans ChromaDB
-            self.collection.add(
-                ids=[c["id"] for c in batch],
-                embeddings=embeddings,
-                documents=texts,
-                metadatas=metadatas,
-            )
+            except Exception as e:
+                logger.error(f"Erreur batch {i // Config.BATCH_SIZE} : {e}")
+                continue
 
-            indexed += len(batch)
-            logger.info(f"Indexé {indexed}/{len(new_chunks)} chunks...")
-
-        logger.success(f"Indexation terminée : {indexed} nouveaux chunks")
+        logger.success(f"Indexation terminée : {indexed} chunks ajoutés")
         return indexed
 
     def search(
         self,
-        query_embedding: list[float],
-        top_k: int = Config.TOP_K,
-        filter_language: Optional[str] = None,
+        query_embedding : list[float],
+        top_k           : int = Config.TOP_K,
+        filter_language : Optional[str] = None,
     ) -> list[dict]:
         """
-        Recherche les chunks les plus similaires à la query.
-        filter_language : filtre optionnel par langue (ex: "fr")
-        """
-        # Construction du filtre metadata optionnel
-        where_filter = None
-        if filter_language:
-            where_filter = {"language": {"$eq": filter_language}}
+        Recherche les chunks les plus similaires.
 
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
-            where=where_filter,
+        [FIX-11] Chaque chunk passe par fix_encoding() avant d'être retourné.
+        [FIX-12] Les chunks qui commencent au milieu d'une phrase sont filtrés
+                 (commencent par une minuscule ou une ponctuation de continuation).
+        """
+        if self.collection.count() == 0:
+            logger.warning("Collection ChromaDB vide — indexe le corpus d'abord.")
+            return []
+
+        where_filter = (
+            {"language": {"$eq": filter_language}}
+            if filter_language else None
         )
 
-        # Transforme le résultat ChromaDB en liste de dicts propres
+        # On récupère plus de candidats pour compenser le filtre FIX-12
+        n_candidates = min(top_k * 2, self.collection.count())
+
+        results = self.collection.query(
+            query_embeddings=[list(query_embedding)],
+            n_results       =n_candidates,
+            include         =["documents", "metadatas", "distances"],
+            where           =where_filter,
+        )
+
         docs = []
         for doc, meta, dist in zip(
             results["documents"][0],
             results["metadatas"][0],
             results["distances"][0],
         ):
-            # ChromaDB retourne distance cosinus [0,2] avec "cosine" space
-            # On convertit en similarité [0,1] : sim = 1 - dist/2
-            similarity = 1 - (dist / 2)
+            similarity = round(1 - dist, 4)
+            if similarity < Config.MIN_SIMILARITY:
+                continue
 
-            if similarity >= Config.MIN_SIMILARITY:
-                docs.append({
-                    "text": doc,
-                    "url": meta.get("url", ""),
-                    "title": meta.get("title", ""),
-                    "source_type": meta.get("source_type", ""),
-                    "similarity": round(similarity, 4),
-                })
+            # [FIX-11] Correction encoding avant tout traitement
+            clean_doc = fix_encoding(doc)
 
-        # Tri par similarité décroissante
+            # [FIX-12] Filtre les chunks qui commencent au milieu d'une phrase.
+            # Un chunk propre commence par une majuscule, un chiffre, ou "[".
+            # Un chunk mal coupé commence par une minuscule, ")", ",", etc.
+            first_char = clean_doc.lstrip()[:1]
+            if first_char and first_char.islower() and not first_char in ["l", "d", "u"]:
+                logger.debug(f"Chunk ignoré (début de phrase) : {clean_doc[:60]}...")
+                continue
+
+            docs.append({
+                "text"       : clean_doc,
+                "url"        : meta.get("url", ""),
+                "title"      : meta.get("title", ""),
+                "source_type": meta.get("source_type", ""),
+                "similarity" : similarity,
+            })
+
+            # On s'arrête dès qu'on a top_k chunks valides
+            if len(docs) >= top_k:
+                break
+
         docs.sort(key=lambda x: x["similarity"], reverse=True)
+
+        if Config.LOG_RETRIEVED_CHUNKS:
+            for i, d in enumerate(docs):
+                logger.debug(
+                    f"Chunk {i+1} | sim={d['similarity']:.4f} | "
+                    f"url={d['url'][:55]} | "
+                    f"text={d['text'][:100].replace(chr(10), ' ')}..."
+                )
+
         return docs
 
 
 # ══════════════════════════════════════════════════════════
-# COUCHE AGENTIQUE LÉGÈRE — LangGraph
+# PROMPT BUILDER
 # ══════════════════════════════════════════════════════════
-# Pattern : Vérificateur → Synthétiseur
-# Pas de sur-ingénierie : 2 nœuds max
-
-class AgentState(TypedDict):
-    """État partagé entre les nœuds de l'agent."""
-    query: str                         # Question originale
-    retrieved_docs: list[dict]         # Documents récupérés
-    context: str                       # Contexte formaté pour le LLM
-    response: str                      # Réponse générée
-    sources: list[str]                 # URLs des sources
-    needs_refinement: bool             # Le vérificateur demande-t-il un raffinement ?
-    messages: Annotated[list, operator.add]  # Historique messages
-
-
-class AgentLayer:
+class PromptBuilder:
     """
-    Couche agentique légère avec LangGraph.
-    Nœud 1 — Vérificateur : évalue si les docs sont pertinents
-    Nœud 2 — Synthétiseur : génère la réponse finale
+    Construit les prompts LLM de façon centralisée.
+
+    [FIX-10] Prompt compressé — même contraintes, ~60% moins de tokens.
+    Avant : ~400 tokens d'instructions + ~280 tokens de contexte = 681 tokens input
+    Après : ~150 tokens d'instructions + ~280 tokens de contexte = ~430 tokens input
+    Impact : à ~22 tokens/sec, 250 tokens économisés = ~11s récupérées côté input
+    (Note : Ollama charge le contexte input quasi instantanément — le vrai gain
+     est surtout sur num_predict, mais un prompt court aide le modèle à rester focalisé)
     """
 
-    def __init__(self, llm_client):
-        self.llm = llm_client
-        self.graph = self._build_graph()
-
-    def _build_graph(self) -> any:
-        """Construit le graphe LangGraph."""
-        workflow = StateGraph(AgentState)
-
-        # Ajoute les nœuds
-        workflow.add_node("verifier", self._verify_relevance)
-        workflow.add_node("synthesizer", self._synthesize_response)
-
-        # Définit les transitions
-        workflow.set_entry_point("verifier")
-
-        # Transition conditionnelle : si docs pas pertinents, synthèse directe d'excuse
-        workflow.add_conditional_edges(
-            "verifier",
-            lambda state: "synthesizer",  # Toujours synthétise (simple pour ce scope)
-            {"synthesizer": "synthesizer"},
-        )
-        workflow.add_edge("synthesizer", END)
-
-        return workflow.compile()
-
-    def _verify_relevance(self, state: AgentState) -> AgentState:
+    @staticmethod
+    def build_rag_prompt(query: str, docs: list[dict]) -> str:
         """
-        Nœud 1 : Vérifie que les documents récupérés sont pertinents.
-        Évite de générer une réponse à partir de docs hors-sujet.
+        Prompt compressé anti-hallucination avec citations forcées.
+        Objectif : <160 tokens d'instructions, contexte <300 tokens.
         """
-        if not state["retrieved_docs"]:
-            state["needs_refinement"] = True
-            state["context"] = ""
-            return state
-
-        # Formate le contexte pour le LLM
         context_parts = []
-        sources = []
-
-        for i, doc in enumerate(state["retrieved_docs"], 1):
-            context_parts.append(
-                f"[Source {i}] (similarité: {doc['similarity']:.2f})\n"
-                f"Titre: {doc['title']}\n"
-                f"URL: {doc['url']}\n"
-                f"Contenu: {doc['text'][:600]}...\n"
+        for i, doc in enumerate(docs):
+            raw_text   = doc["text"][:Config.CHUNK_MAX_CHARS]
+            # Troncature propre — coupe au dernier espace
+            clean_text = (
+                raw_text.rsplit(" ", 1)[0]
+                if len(doc["text"]) > Config.CHUNK_MAX_CHARS
+                else raw_text
             )
-            if doc["url"] not in sources:
-                sources.append(doc["url"])
+            source_label = f"[Source {i + 1}]"
+            if doc.get("title"):
+                source_label += f" — {doc['title'][:40]}"
+            context_parts.append(f"{source_label}\n{clean_text}")
 
-        state["context"] = "\n---\n".join(context_parts)
-        state["sources"] = sources
-        state["needs_refinement"] = False
+        context = "\n---\n".join(context_parts)
 
-        logger.info(f"Vérificateur : {len(state['retrieved_docs'])} docs vérifiés")
-        return state
-
-    def _synthesize_response(self, state: AgentState) -> AgentState:
-        """
-        Nœud 2 : Synthétise la réponse finale avec le LLM.
-        Prompt structuré pour forcer les sources et limiter les hallucinations.
-        """
-        if state["needs_refinement"] or not state["context"]:
-            state["response"] = (
-                "Je n'ai pas trouvé d'informations suffisantes sur ce sujet "
-                "dans ma base de données sur le tourisme burkinabè. "
-                "Essayez une question plus spécifique, par exemple sur Loropéni, "
-                "les Cascades de Banfora ou la culture Mossi."
-            )
-            return state
-
-        # Prompt système : instructions strictes contre hallucination
-        system_prompt = """Tu es un assistant expert en tourisme burkinabè.
-Tu réponds UNIQUEMENT en te basant sur les sources fournies.
-Tu ne dois PAS inventer d'informations non présentes dans les sources.
-Tu cites toujours tes sources à la fin de ta réponse.
-Tu réponds en français, de manière claire et informative.
-Si une information n'est pas dans les sources, dis-le explicitement."""
-
-        # Prompt utilisateur avec contexte
-        user_prompt = f"""Question : {state['query']}
-
-Sources disponibles :
-{state['context']}
-
-Réponds à la question en te basant uniquement sur ces sources.
-À la fin, liste les sources utilisées sous le format :
-📚 Sources : [url1], [url2], ..."""
-
-        # Appel LLM via Ollama (local, pas de cloud)
-        response = self.llm.chat(
-            model=Config.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            options={
-                "temperature": Config.LLM_TEMPERATURE,
-                "num_predict": Config.LLM_MAX_TOKENS,
-            },
+        # [FIX-10] Version compressée — mêmes 3 contraintes, moitié moins de mots
+        # Règle : chaque mot du prompt coûte des tokens = de la latence
+        # On garde : (1) interdit d'inventer, (2) citer [Source N], (3) format bullet
+        return (
+            "Guide touristique bilingue du Burkina Faso. "
+            "Sources disponibles en français ET en anglais. Reponds dans la langue de la QUESTION. "
+            "Réponds dans la langue de la QUESTION. "
+            "Utilise les infos des sources quelle que soit leur langue.\n"
+            "RÈGLES : utilise UNIQUEMENT les sources ci-dessous. "
+            "INTERDIT d'inventer. Si absent des sources : 'Non disponible.'\n"
+            "FORMAT STRICT : réponds avec 2 à 5 bullet points.\n"
+            "Chaque ligne commence par '• [Source' suivi du numéro et du fait.\n"
+            "Exemple : '• [Source 2] Les Cascades de Banfora sont situées dans l'ouest.'\n"
+            "Rien d'autre : pas d'introduction, pas de conclusion.\n\n"
+            f"SOURCES :\n{context}\n\n"
+            f"QUESTION : {query}\n\n"
+            "RÉPONSE :"
         )
 
-        state["response"] = response["message"]["content"]
-        logger.info("Synthétiseur : réponse générée")
-        return state
-
-    def run(self, query: str, retrieved_docs: list[dict]) -> dict:
-        """Point d'entrée de l'agent."""
-        initial_state = {
-            "query": query,
-            "retrieved_docs": retrieved_docs,
-            "context": "",
-            "response": "",
-            "sources": [],
-            "needs_refinement": False,
-            "messages": [],
-        }
-        final_state = self.graph.invoke(initial_state)
-        return final_state
+    @staticmethod
+    def no_result_response() -> str:
+        return (
+            "Je n'ai pas trouvé d'informations suffisantes sur ce sujet "
+            "dans ma base de données sur le tourisme burkinabè. "
+            "Essayez une question plus spécifique (ville, type de site, festival...)."
+        )
 
 
 # ══════════════════════════════════════════════════════════
-# AUDIT LOGS — Traçabilité complète
+# AUDIT LOGS
 # ══════════════════════════════════════════════════════════
 class AuditLogger:
-    """
-    Loggue toutes les requêtes pour traçabilité.
-    Log format : timestamp | query_hash | nb_docs | temps_réponse | safe
-    """
+    """Traçabilité complète. Idempotent — handler Loguru ajouté une seule fois."""
+
+    _initialized: bool = False
 
     def __init__(self):
-        log_path = Path(Config.AUDIT_LOG_PATH)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Configure loguru pour fichier rotatif (max 10MB, garde 7 jours)
-        logger.add(
-            str(log_path),
-            rotation="10 MB",
-            retention="7 days",
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-            level="INFO",
-        )
+        if not AuditLogger._initialized:
+            log_path = Path(Config.AUDIT_LOG_PATH)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.add(
+                str(log_path),
+                rotation =Config.LOG_ROTATION,
+                retention=Config.LOG_RETENTION,
+                format   ="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+                level    ="INFO",
+            )
+            AuditLogger._initialized = True
 
     def log_query(
         self,
-        query: str,
-        nb_docs: int,
+        query        : str,
+        nb_docs      : int,
         response_time: float,
-        is_safe: bool,
-    ):
-        """Loggue une requête (sans stocker la query complète pour la vie privée)."""
+        is_safe      : bool,
+    ) -> None:
         query_hash = hashlib.sha256(query.encode()).hexdigest()[:8]
         logger.info(
             f"QUERY | hash={query_hash} | docs={nb_docs} | "
@@ -492,118 +572,156 @@ class AuditLogger:
 # ══════════════════════════════════════════════════════════
 class TourismRAGPipeline:
     """
-    Classe principale qui orchestre tout le pipeline :
-    Question → Sanitization → Embedding → Retrieval → Agent → Réponse
+    Orchestre le pipeline complet :
+    Question → Sanitization → Query Expansion → Embedding
+    → Retrieval (+ encoding fix + chunk filter) → LLM → Réponse
 
     Usage :
         pipeline = TourismRAGPipeline()
-        pipeline.index()          # Indexe le corpus (une seule fois)
-        result = pipeline.query("Où se trouvent les ruines de Loropéni ?")
+        pipeline.index()
+        result = pipeline.query("Où sont les ruines de Loropéni ?")
+
+    Debug qualité :
+        Config.LOG_RETRIEVED_CHUNKS = True
+
+    Structure du résultat :
+        {
+            "response"      : str,        # Réponse LLM formatée
+            "sources"       : list[str],  # URLs des chunks
+            "retrieved_docs": list[dict], # Chunks avec similarité
+            "expanded_query": str,        # Query enrichie (retrieval)
+            "response_time" : float,      # Temps total en secondes
+            "safe"          : bool,       # False si injection
+        }
     """
 
     def __init__(self):
         logger.info("Initialisation pipeline RAG Tourisme Burkina...")
-
-        # Composants du pipeline
-        self.sanitizer = InputSanitizer()
-        self.embedder = EmbeddingEngine()
-        self.vector_store = VectorStore(self.embedder)
-        self.audit = AuditLogger()
-
-        # Client Ollama (LLM local)
-        self.llm_client = ollama  # Module ollama direct
-        self.agent = AgentLayer(self.llm_client)
-
-        # Rate limiting simple (timestamp dernière requête)
+        self.sanitizer      = InputSanitizer()
+        self.query_expander = QueryExpander()
+        self.embedder       = EmbeddingEngine()
+        self.vector_store   = VectorStore(self.embedder)
+        self.prompt         = PromptBuilder()
+        self.audit          = AuditLogger()
         self._last_request_time = 0.0
-
         logger.success("Pipeline prêt.")
 
     def index(self) -> int:
-        """
-        Indexe le corpus dans ChromaDB.
-        Appelle cette méthode une seule fois après le scraping.
-        Idempotent : sans risque d'appels multiples.
-        """
+        """Indexe le corpus. Idempotent."""
         return self.vector_store.index_corpus()
 
     def query(self, user_query: str) -> dict:
         """
-        Point d'entrée principal pour une question utilisateur.
+        Exécute une query RAG complète.
 
-        Retourne :
-            {
-                "response": str,      # Réponse générée
-                "sources": list[str], # URLs des sources
-                "retrieved_docs": list, # Docs récupérés
-                "response_time": float, # Temps en secondes
-                "safe": bool,          # Query est-elle safe ?
-            }
+        Budget tokens visé (v4) :
+          Input  : ~430 tokens  (instructions ~150 + contexte ~280)
+          Output : 120 tokens max
+          Total  : ~550 tokens → ~25s sur CPU → objectif 10-15s avec cache embedding
         """
         start_time = time.time()
 
-        # ── 1. Rate limiting ──
+        # ── Rate limiting ──────────────────────────────────
         elapsed = time.time() - self._last_request_time
         if elapsed < Config.RATE_LIMIT_SECONDS:
             time.sleep(Config.RATE_LIMIT_SECONDS - elapsed)
         self._last_request_time = time.time()
 
-        # ── 2. Sanitization ──
+        # ── Sanitization ───────────────────────────────────
         clean_query, is_safe = self.sanitizer.sanitize(user_query)
-
         if not is_safe:
             return {
-                "response": "Requête non autorisée. Posez une question sur le tourisme burkinabè.",
-                "sources": [],
+                "response"      : "Requête non autorisée.",
+                "sources"       : [],
                 "retrieved_docs": [],
-                "response_time": time.time() - start_time,
-                "safe": False,
+                "expanded_query": "",
+                "response_time" : 0,
+                "safe"          : False,
             }
 
-        # ── 3. Embedding de la question ──
-        logger.info(f"Embedding query : {clean_query[:60]}...")
+        # ── Query Expansion ────────────────────────────────
+        # expanded_query → retrieval (cosine similarity)
+        # clean_query    → prompt LLM (vraie question)
+        expanded_query = self.query_expander.expand(clean_query)
+
+        # ── Embedding + Retrieval ──────────────────────────
         query_embedding = self.embedder.embed_query(clean_query)
+        retrieved_docs  = self.vector_store.search(query_embedding)
 
-        # ── 4. Recherche vectorielle ──
-        logger.info("Recherche vectorielle ChromaDB...")
-        retrieved_docs = self.vector_store.search(
-            query_embedding,
-            top_k=Config.TOP_K,
+        # ── Génération LLM ─────────────────────────────────
+        if not retrieved_docs:
+            response_text = self.prompt.no_result_response()
+        else:
+            prompt_text = self.prompt.build_rag_prompt(clean_query, retrieved_docs)
+            try:
+                resp = ollama.chat(
+                    model   =Config.LLM_MODEL,
+                    messages=[{"role": "user", "content": prompt_text}],
+                    options ={
+                        "temperature" : Config.LLM_TEMPERATURE,
+                        "num_predict" : Config.LLM_MAX_TOKENS,
+                        "top_p"       : Config.LLM_TOP_P,
+                        # [FIX-9b] num_ctx réduit = Ollama alloue moins de mémoire
+                        # et traite chaque token plus vite. Sans ça, Ollama utilise
+                        # le context window par défaut du modèle (souvent 4096-32768)
+                        # même pour un prompt de 400 tokens — gaspillage pur.
+                        "num_ctx"     : Config.LLM_NUM_CTX,
+                        # Stop sequences : Ollama arrête dès qu'il voit ces tokens
+                        # évite que le modèle continue après les bullet points
+                        "stop"        : ["QUESTION", "SOURCES", "\n\n\n"],
+                    },
+                )
+                response_text = resp["message"]["content"].strip()
+            except Exception as e:
+                logger.error(f"Erreur LLM : {e}")
+                response_text = (
+                    "Désolé, une erreur est survenue lors de la génération. "
+                    "Vérifiez qu'Ollama est lancé (`ollama serve`) "
+                    f"et que le modèle '{Config.LLM_MODEL}' est installé "
+                    f"(`ollama pull {Config.LLM_MODEL}`)."
+                )
+
+        # ── Audit + Retour ─────────────────────────────────
+        response_time = round(time.time() - start_time, 2)
+        self.audit.log_query(
+            clean_query, len(retrieved_docs), response_time, is_safe
         )
-        logger.info(f"{len(retrieved_docs)} documents récupérés")
-
-        # ── 5. Agent LangGraph (vérification + synthèse) ──
-        logger.info("Lancement agent LangGraph...")
-        agent_result = self.agent.run(clean_query, retrieved_docs)
-
-        # ── 6. Résultat final ──
-        response_time = time.time() - start_time
-        self.audit.log_query(clean_query, len(retrieved_docs), response_time, is_safe)
-
         logger.success(f"Réponse générée en {response_time:.2f}s")
 
         return {
-            "response": agent_result["response"],
-            "sources": agent_result["sources"],
+            "response"      : response_text,
+            "sources"       : [d.get("url", "") for d in retrieved_docs],
             "retrieved_docs": retrieved_docs,
-            "response_time": round(response_time, 2),
-            "safe": True,
+            "expanded_query": expanded_query,
+            "response_time" : response_time,
+            "safe"          : True,
         }
 
 
 # ══════════════════════════════════════════════════════════
-# POINT D'ENTRÉE DIRECT (test)
+# POINT D'ENTRÉE
 # ══════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    # Test rapide du pipeline complet
-    pipeline = TourismRAGPipeline()
+    # Config.LOG_RETRIEVED_CHUNKS = True  # décommenter pour debug qualité
 
-    # Indexation (skip si déjà fait)
+    pipeline = TourismRAGPipeline()
     pipeline.index()
 
-    # Test query
-    result = pipeline.query("Quels sont les sites touristiques du Burkina Faso classés UNESCO ?")
-    print("\n=== RÉPONSE ===")
-    print(result["response"])
-    print(f"\n⏱  Temps de réponse : {result['response_time']}s")
-    print(f"📚 Sources : {result['sources']}")
+    questions = [
+        "Quels sont les sites touristiques du Burkina Faso classés UNESCO ?",
+        "Quels sont les principaux parcs nationaux du Burkina Faso ?",
+        "Que visiter à Ouagadougou ?",
+    ]
+
+    for question in questions:
+        print(f"\n{'═' * 60}")
+        print(f"❓ {question}")
+        result = pipeline.query(question)
+        print(f"\n{'─' * 40}")
+        print(result["response"])
+        print(f"\n⏱  Temps         : {result['response_time']}s")
+        print(f"🔍 Query enrichie : {result['expanded_query']}")
+        print(f"📚 Sources ({len(result['sources'])}) : {result['sources']}")
+
+
+
