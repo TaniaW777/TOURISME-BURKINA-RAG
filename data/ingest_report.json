@@ -1,0 +1,297 @@
+{
+  "generated_at": "2026-10-17T12:32:12Z",
+  "sources_requested": 37,
+  "documents": 37,
+  "chunks": 1383,
+  "exact_duplicates_removed": 3,
+  "unmergeable_fragments_dropped": 1,
+  "dropped_fragments": [
+    {
+      "fragment": "(consulté le )",
+      "chunk_id": "0517b3ff5d6f8d6f_chunk_0008",
+      "document_id": "0517b3ff5d6f8d6f",
+      "url": "https://fr.wikipedia.org/wiki/Cascades_de_Banfora",
+      "reason": "fragment court sans valeur informationnelle",
+      "rule": "is_boilerplate_fragment (motif de citation/initiale/ponctuation)"
+    }
+  ],
+  "languages": {
+    "fr": 32,
+    "en": 4,
+    "unknown": 1
+  },
+  "source_status": {
+    "ok": 37
+  },
+  "token_stats": {
+    "max": 126,
+    "avg": 90.5,
+    "limit": 126
+  },
+  "char_stats": {
+    "min": 59,
+    "avg": 341,
+    "max": 614
+  },
+  "entries": [
+    {
+      "url": "https://fr.wikipedia.org/wiki/Tourisme_au_Burkina_Faso",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Ruines_de_Lorop%C3%A9ni",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Banfora",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Cascades_de_Banfora",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Pics_de_Sindou",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Laongo",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Bobo-Dioulasso",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Ouagadougou",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/FESPACO",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/R%C3%A9serve_de_Nazinga",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Mare_aux_Hippopotames_de_la_r%C3%A9gion_des_Hauts-Bassins_au_Burkina_-_Faso",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Parc_du_W",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikipedia.org/wiki/Parc_national_d%27Arly",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikivoyage.org/wiki/Burkina_Faso",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikivoyage.org/wiki/Ouagadougou",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikivoyage.org/wiki/Bobo-Dioulasso",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fr.wikivoyage.org/wiki/Banfora",
+      "status": "ok",
+      "language": "fr",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://en.wikivoyage.org/wiki/Burkina_Faso",
+      "status": "ok",
+      "language": "en",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://en.wikivoyage.org/wiki/Ouagadougou",
+      "status": "ok",
+      "language": "en",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://en.wikivoyage.org/wiki/Bobo-Dioulasso",
+      "status": "ok",
+      "language": "en",
+      "trust": "encyclopedia",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://www.presidencedufaso.bf/opportunites-touristiques/",
+      "status": "ok",
+      "language": "fr",
+      "trust": "institutional",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://www.ambabf-afriquedusud.gov.bf/index.php/fr/burkina-faso/culture-et-tourisme",
+      "status": "ok",
+      "language": "fr",
+      "trust": "institutional",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://lefaso.net/spip.php?article123907",
+      "status": "ok",
+      "language": "fr",
+      "trust": "press",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://lefaso.net/spip.php?article139606",
+      "status": "ok",
+      "language": "fr",
+      "trust": "press",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://lefaso.net/spip.php?article17427",
+      "status": "ok",
+      "language": "fr",
+      "trust": "press",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://lefaso.net/spip.php?rubrique=tourisme",
+      "status": "ok",
+      "language": "fr",
+      "trust": "press",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://sentinellebf.com/burkina-faso-lontb-devient-faso-tourisme/",
+      "status": "ok",
+      "language": "fr",
+      "trust": "press",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://lesvoyageusesduquebec.com/voyage-au-burkina-faso-que-faire-et-visiter/",
+      "status": "ok",
+      "language": "fr",
+      "trust": "blog",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://cultureburkinabe.family.blog/2020/01/18/sites-touristiques-du-burkina-2/",
+      "status": "ok",
+      "language": "fr",
+      "trust": "blog",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://www.tourisme-equitable.org/destinations/burkina-faso/",
+      "status": "ok",
+      "language": "unknown",
+      "trust": "blog",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://baobab-gourmantche.over-blog.com/2013/12/le-tour-du-lac.html",
+      "status": "ok",
+      "language": "fr",
+      "trust": "blog",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://www.lonelyplanet.com/destinations/burkina-faso",
+      "status": "ok",
+      "language": "en",
+      "trust": "blog",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://www.partir.com/Burkina-faso/",
+      "status": "ok",
+      "language": "fr",
+      "trust": "blog",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://www.partir.com/Burkina-faso/lieux-d-interet.html",
+      "status": "ok",
+      "language": "fr",
+      "trust": "blog",
+      "offline_rechunk": true
+    },
+    {
+      "url": "https://fasoeducation.bf/cours_esu/secondaire/terminale/hg/geographie/secteur_tertiaire_transports_commerce_tourisme_telecommunications/co/grain_caractour.html",
+      "status": "ok",
+      "language": "fr",
+      "trust": "institutional",
+      "offline_rechunk": true
+    },
+    {
+      "url": "local:Burkina-Faso-et-Cote-dIvoire-etude-developpement-touristique-zone-frontaliere.pdf",
+      "status": "ok",
+      "language": "fr",
+      "trust": "institutional",
+      "offline_rechunk": true
+    },
+    {
+      "url": "local:Strategie_regionale-du-tourisme-durable_des_Hauts-Bassins_Avril_2014.pd-f.pdf",
+      "status": "ok",
+      "language": "fr",
+      "trust": "institutional",
+      "offline_rechunk": true
+    }
+  ]
+}
