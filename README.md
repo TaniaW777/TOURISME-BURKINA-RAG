@@ -1,174 +1,174 @@
-# 🇧🇫 Assistant IA Tourisme Burkina Faso — Système RAG Open Source
+# 🇧🇫 Assistant IA Tourisme Burkina Faso — Système RAG open source
 
-> Système de questions-réponses 100% open source sur le tourisme burkinabè.
-> BGE-M3 + ChromaDB + Qwen3 via Ollama. Zéro coût cloud. Zéro API propriétaire.
+> Questions-réponses en français sur le tourisme burkinabè, fondées sur un
+> corpus cité et vérifiable.
+> Embeddings MiniLM locaux + ChromaDB + génération via l'API Groq.
+> Le chemin historique (Ollama local) reste disponible en transition.
 
-## Sujet choisi : Tourisme Burkina Faso
-
-**Justification :** Le tourisme burkinabè (Loropéni UNESCO, Cascades de Banfora,
-Laongo, FESPACO, artisanat Mossi) est documentable, sous-représenté en IA francophone,
-et pertinent pour valoriser le patrimoine local. Critères remplis : 500+ sources
-accessibles, forte pertinence locale, données en français.
+**État du projet :** pipeline v2 complet (retrieval manifesté, génération
+citéée, abstention sans preuve) testé hors-ligne — **229 tests verts,
+2 sautés** — et intégré en CI sur chaque PR. Le parcours **live** Groq
+n'a pas encore été vérifié en conditions réelles : voir
+`docs/phase4-groq-smoke-test.md` (procédure manuelle).
 
 ---
 
-## Architecture technique
+## Architecture réelle (v2)
 
 ```
-Question
+Question (API FastAPI ou interface Gradio)
    │
    ▼
-[Sanitization] ← Prompt injection detection, bleach, max length
+Sanitization (InputSanitizer, longueur max, détection d'injection)
    │
    ▼
-[Embeddings] ← BAAI/bge-m3 (multilingual, top MTEB, local)
+Retriever v2 — embeddings paraphrase-multilingual-MiniLM-L12-v2 (locaux,
+normalisés) → ChromaDB data/chroma_db_v2 (cosine, similarity = 1 − distance)
+   │    ▲ validé au démarrage contre data/index_manifest.json (modèle,
+   │      dimension, comptes, sha256 du corpus — tout écart = erreur claire)
+   ▼
+Générateur — prompt français anti-hallucination, passages délimités comme
+données non fiables → LLMService (GroqService : API Groq, retries bornés,
+Retry-After plafonné, erreurs typées)
    │
    ▼
-[ChromaDB] ← Recherche vectorielle (cosine similarity, top-5)
+Validation des citations ([Source N] doit mapper vers une preuve récupérée)
    │
    ▼
-[Agent LangGraph] ← Vérificateur → Synthétiseur
-   │
-   ▼
-[Ollama + Qwen3] ← LLM local, réponse + sources citées
-   │
-   ▼
-Réponse
+Réponse en français, sources citées — ou ABSTENTION explicite si preuve
+insuffisante (aucun appel LLM sans preuve ; réponse sans citation valide
+= abstention)
 ```
 
-**Couche agentique légère (LangGraph) :**
-- Nœud 1 — Vérificateur : évalue la pertinence des documents récupérés
-- Nœud 2 — Synthétiseur : génère la réponse avec sources obligatoires
+**Limite assumée :** la validation des citations prouve que chaque `[Source N]`
+correspond à un document réellement récupéré ; elle ne prouve pas que le
+passage soutient sémantiquement l'affirmation (évaluation à venir).
 
 ---
 
-## Technologies open source utilisées
+## Composants
 
-| Composant | Technologie | Licence | Lien |
-|-----------|------------|---------|------|
-| Embeddings | sentence-transformers + BAAI/bge-m3 | Apache 2.0 / MIT | [github](https://github.com/UKPLab/sentence-transformers) |
-| Base vectorielle | ChromaDB | Apache 2.0 | [github](https://github.com/chroma-core/chroma) |
-| LLM | Ollama + Qwen2.5-7B | MIT / Apache 2.0 | [github](https://github.com/ollama/ollama) |
-| Agent | LangGraph | MIT | [github](https://github.com/langchain-ai/langgraph) |
-| Backend | FastAPI | MIT | [github](https://github.com/tiangolo/fastapi) |
-| Frontend | Gradio | Apache 2.0 | [github](https://github.com/gradio-app/gradio) |
-| Scraping | BeautifulSoup4 + trafilatura | MIT / Apache 2.0 | [github](https://github.com/adbar/trafilatura) |
-| Sécurité inputs | bleach | Apache 2.0 | [github](https://github.com/mozilla/bleach) |
-| Logs | loguru | MIT | [github](https://github.com/Delgan/loguru) |
-| Rate limiting | slowapi | MIT | [github](https://github.com/laurentS/slowapi) |
+| Composant | Technologie | Rôle |
+|---|---|---|
+| Embeddings | `sentence-transformers` + `paraphrase-multilingual-MiniLM-L12-v2` | requête et corpus (identiques, normalisés) |
+| Base vectorielle | ChromaDB (`tourisme_burkina_v2`, cosine) | index persistant reconstruit hors-ligne |
+| Génération (v2) | `groq` (API Groq, défaut `openai/gpt-oss-20b`) | réponses françaises citées |
+| Génération (legacy) | `ollama` + `langgraph`/`langchain-core` | chemin historique, sélectionnable |
+| Backend | FastAPI + slowapi | API + rate limiting |
+| UI | Gradio | interface web locale |
+| Ingestion | requests, trafilatura, BeautifulSoup, pdfplumber | collecte respectueuse (robots.txt, TLS vérifié, limites de taille) |
+| Tests | pytest + reportlab + PyYAML | 229 tests hors-ligne en CI |
 
 ---
 
-## Installation pas-à-pas
+## Installation
 
-### Prérequis
-- Python 3.10+
-- [Ollama](https://ollama.com) installé localement
-- Git
-
-### 1. Clone le repo
 ```bash
 git clone https://github.com/TaniaW777/TOURISME-BURKINA-RAG.git
-cd tourisme-burkina-rag
-```
-
-### 2. Installe les dépendances Python
-```bash
+cd TOURISME-BURKINA-RAG
+python -m venv venv && venv\Scripts\activate     # Windows
 pip install -r requirements.txt
 ```
 
-### 3. Installe le modèle LLM via Ollama
+Clé Groq (génération v2) : créez une clé sur https://console.groq.com/keys
+puis exportez-la — **jamais** dans un fichier committé :
+
 ```bash
-# Démarre Ollama en arrière-plan
-ollama serve &
-
-# Télécharge le modèle (~4GB)
-ollama pull qwen2.5:7b-instruct
-
-# Alternative si RAM limitée (<8GB) :
-ollama pull mistral:7b-instruct
+export GROQ_API_KEY="votre-clé"        # Windows PowerShell : $env:GROQ_API_KEY="..."
 ```
 
-### 4. Collecte les données (scraping)
-```bash
-# Lance le scraper (respecte robots.txt automatiquement)
-python data/scraping_script.py
+Sans clé, l'application démarre en **mode dégradé** (API et interface se
+lancent, `/health` explique, `/query` répond 503) — il n'y a **jamais** de
+repli silencieux vers Ollama.
 
-# Vérifie le corpus généré
-wc -l data/corpus.json   # Doit afficher 500+ entrées
+### Variables d'environnement (voir `.env.example`)
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `GROQ_API_KEY` | — | clé API Groq (secrète, côté serveur uniquement) |
+| `GROQ_MODEL` | `openai/gpt-oss-20b` | modèle de génération |
+| `GROQ_TIMEOUT_S` / `GROQ_MAX_RETRIES` | 20 / 2 | bornes d'appel |
+| `LLM_PROVIDER` | `groq` | `groq` (v2) ou `legacy` (Ollama — **API uniquement**, l'interface Gradio utilise toujours v2) |
+| `EMBEDDING_MODEL` | `paraphrase-multilingual-MiniLM-L12-v2` | doit correspondre au manifeste de l'index |
+| `TOP_K` / `MIN_SIMILARITY` | 5 / 0.30 | paramètres de retrieval |
+| `RATE_LIMIT_PER_MINUTE` | 10 | limite slowapi |
+
+---
+
+## Corpus et index
+
+Corpus committé et reproductible : `data/chunks.jsonl` — **1 383 chunks
+validés au tokenizer** (≤ 128 tokens), issus de **37 documents** (32 fr,
+4 en, 1 non déterminé) couvrant **41 sources curées** (`data/sources.yaml` :
+Wikipédia/Wikivoyage FR+EN, institutionnels `.bf`, UNESCO, presse, blogs)
+et 2 PDFs locaux. Chaque fragment abandonné est audité dans
+`data/ingest_report.json`.
+
+```bash
+# (Re)collecter les sources — respecte robots.txt, TLS vérifié, limites de taille
+python scripts/ingest.py
+# Rechunker sans réseau depuis data/documents.jsonl
+python scripts/ingest.py --from-documents data/documents.jsonl
+
+# Construire l'index v2 (hors-ligne, déterministe, manifeste atomique)
+python scripts/build_index.py
+# → data/chroma_db_v2/ (gitignoré) + data/index_manifest.json
 ```
 
-### 5. Lance l'interface
+L'index n'est **jamais** construit au démarrage de l'application : le
+retriever charge et vérifie l'index existant via son manifeste.
+
+## Lancer
+
 ```bash
-# Option A : Interface Gradio (recommandée)
+# API — http://localhost:8000/docs (Swagger)
+uvicorn src.api:app --host 0.0.0.0 --port 8000
+
+# Interface Gradio — http://localhost:7860
 python frontend/app.py
-# → Ouvre http://localhost:7860
-
-# Option B : API FastAPI
-uvicorn src.api:app --host 0.0.0.0 --port 8000 --reload
-# → Docs Swagger : http://localhost:8000/docs
 ```
 
-### 6. Évalue le système
-```bash
-python evaluation/eval.py
-# Résultats dans evaluation/results.json et evaluation/report.txt
-```
+### Endpoints API
+
+| Route | Comportement |
+|---|---|
+| `POST /query` | `{question, top_k?}` → réponse française, `sources` (preuves citées), `documents` (preuves récupérées), `citations`, `abstained`, `response_time`, `safe` ; 503 en mode dégradé |
+| `GET /health` | état de configuration **sans réseau** : provider, clé, manifeste, diagnostics |
+| `GET /health/provider` | sonde Groq **réelle** (consomme du quota — à appeler à la demande) |
+| `GET /stats` | comptes de l'index, modèles configurés |
+| `POST /index` | chemin legacy uniquement ; 501 sur v2 (l'indexation est hors-ligne) |
 
 ---
 
-## Structure du repo
-
-```
-tourisme-burkina-rag/
-├── data/
-│   ├── scraping_script.py   # Scraper web (BeautifulSoup + trafilatura)
-│   ├── corpus.json          # Corpus généré (500+ chunks)
-│   └── sources.txt          # URLs sources scrapées
-├── src/
-│   ├── rag_pipeline.py      # Pipeline RAG complet (commenté ligne/ligne)
-│   └── api.py               # API FastAPI
-├── frontend/
-│   └── app.py               # Interface Gradio
-├── evaluation/
-│   ├── eval.py              # 20 questions + métriques
-│   ├── results.json         # Résultats JSON
-│   └── report.txt           # Rapport lisible
-├── requirements.txt         # Dépendances + licences
-├── LICENSE                  # MIT
-└── README.md
-```
-
----
-
-## Résultats d'évaluation (à remplir après run)
-
-| Métrique | Résultat | Objectif |
-|----------|---------|---------|
-| Précision Retrieval | _à compléter_ | >85% |
-| Pertinence Réponse | _à compléter_ | >3.5/5 |
-| Temps Réponse (moy) | _à compléter_ | <3s |
-
----
-
-## Commits Git recommandés
+## Tests et CI
 
 ```bash
-git init
-git add .
-git commit -m "feat: initial project structure"
-
-# Après scraping :
-git add data/corpus.json data/sources.txt
-git commit -m "data: add tourism corpus (500+ chunks)"
-
-# Après chaque fichier code :
-git commit -m "feat: add RAG pipeline with BGE-M3 + ChromaDB"
-git commit -m "feat: add FastAPI backend with security"
-git commit -m "feat: add Gradio frontend"
-git commit -m "eval: add 20-question evaluation dataset"
+pytest tests/ -q        # 229 passed, 2 skipped — hors-ligne, sans clé, sans modèle
 ```
+
+GitHub Actions exécute la suite sur chaque PR et push vers `main`
+(`.github/workflows/tests.yml`). Les tests d'acceptance bout-en-bout
+traversent la pile v2 complète sur index factice déterministe
+(`tests/test_acceptance_v2.py`).
+
+## Sécurité
+
+- Clé Groq lue uniquement de l'environnement ; jamais loguée, jamais
+  renvoyée au client (testé).
+- Entrées utilisateur assainies (longueur, HTML, heuristiques d'injection).
+- Passages récupérés traités comme **données non fiables** (délimiteurs +
+  consigne d'ignorer leurs instructions éventuelles).
+- Scraper : robots.txt strict, TLS vérifié, limites de taille, User-Agent
+  honnête, registre de sources auditable.
+
+## Héritage et transition
+
+- Le pipeline Ollama historique (`src/rag_pipeline.py`) reste utilisable via
+  `LLM_PROVIDER=legacy` (API) et est archivé dans la branche
+  `archive/legacy-ollama-pre-groq`. Il sera retiré après validation du
+  parcours Groq en conditions réelles.
+- Le test manuel live Groq : `docs/phase4-groq-smoke-test.md` (jamais en CI).
 
 ---
 
-*Licence MIT — Contribution bienvenue — 🇧🇫 Fait pour valoriser le tourisme burkinabè*
+*Licence MIT — Contribution bienvenue — 🇧🇫*
